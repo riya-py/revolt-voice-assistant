@@ -51,10 +51,10 @@ class GeminiLiveConnection {
     this.clientWs = clientWs;
     this.geminiWs = null;
     this.isConnected = false;
-    this.setupConnection();
+    this.connect();
   }
 
-  async setupConnection() {
+  async connect() {
     try {
       const url = `${GEMINI_WS_URL}?key=${process.env.GEMINI_API_KEY}`;
       this.geminiWs = new WebSocket(url);
@@ -97,9 +97,24 @@ class GeminiLiveConnection {
           if (message.setupComplete) {
             console.log('Gemini setup complete');
           } else if (message.serverContent) {
-            // Forward audio response to client
+            // Look for audio content in the response
+            if (message.serverContent.parts) {
+              const audioPart = message.serverContent.parts.find(
+                part => part.inline_data && part.inline_data.mime_type && part.inline_data.mime_type.startsWith('audio/')
+              );
+              
+              if (audioPart) {
+                // Forward audio response to client
+                this.clientWs.send(JSON.stringify({
+                  type: 'audio_response',
+                  data: audioPart
+                }));
+              }
+            }
+            
+            // Also forward the entire serverContent for compatibility
             this.clientWs.send(JSON.stringify({
-              type: 'audio_response',
+              type: 'server_content',
               data: message.serverContent
             }));
           } else if (message.toolCallCancellation) {
@@ -121,32 +136,46 @@ class GeminiLiveConnection {
       this.geminiWs.on('close', () => {
         console.log('Gemini WebSocket closed');
         this.isConnected = false;
+        // Optionally attempt reconnection here
       });
 
     } catch (error) {
       console.error('Failed to setup Gemini connection:', error);
+      this.clientWs.send(JSON.stringify({
+        type: 'error',
+        message: 'Failed to initialize AI connection'
+      }));
     }
   }
 
-  sendAudioToGemini(audioData) {
-    if (this.isConnected && this.geminiWs) {
-      const message = {
-        clientContent: {
-          turns: [{
-            role: 'user',
-            parts: [{
-              inline_data: {
-                mime_type: 'audio/pcm',
-                data: audioData
-              }
-            }]
-          }],
-          turn_complete: true
-        }
-      };
-      
-      this.geminiWs.send(JSON.stringify(message));
+  // Support for chunked audio (new approach)
+  sendAudioChunk(audioBase64, mimeType = 'audio/pcm', isFinal = true) {
+    if (!this.isConnected || !this.geminiWs) {
+      console.warn('Cannot send audio: Gemini not connected');
+      return;
     }
+
+    const message = {
+      clientContent: {
+        turns: [{
+          role: 'user',
+          parts: [{
+            inline_data: {
+              mime_type: mimeType,
+              data: audioBase64
+            }
+          }]
+        }],
+        turn_complete: isFinal
+      }
+    };
+    
+    this.geminiWs.send(JSON.stringify(message));
+  }
+
+  // Support for legacy audio sending (original approach)
+  sendAudioToGemini(audioData) {
+    this.sendAudioChunk(audioData, 'audio/pcm', true);
   }
 
   sendInterruption() {
@@ -170,7 +199,9 @@ class GeminiLiveConnection {
   close() {
     if (this.geminiWs) {
       this.geminiWs.close();
+      this.geminiWs = null;
     }
+    this.isConnected = false;
   }
 }
 
@@ -188,8 +219,17 @@ wss.on('connection', (ws) => {
       
       switch (data.type) {
         case 'audio_input':
-          // Forward audio to Gemini
+          // Legacy support - forward audio to Gemini
           geminiConnection.sendAudioToGemini(data.audio);
+          break;
+
+        case 'audio_chunk':
+          // New chunked audio approach
+          geminiConnection.sendAudioChunk(
+            data.audio, 
+            data.mimeType || 'audio/pcm', 
+            data.final !== false
+          );
           break;
           
         case 'interrupt':
@@ -199,7 +239,7 @@ wss.on('connection', (ws) => {
           
         case 'start_conversation':
           // Initialize conversation if needed
-          console.log('Starting conversation');
+          console.log('Starting conversation for connection:', connectionId);
           break;
           
         default:
@@ -215,7 +255,7 @@ wss.on('connection', (ws) => {
   });
 
   ws.on('close', () => {
-    console.log('Client disconnected');
+    console.log('Client disconnected:', connectionId);
     geminiConnection.close();
     activeConnections.delete(connectionId);
   });
@@ -242,7 +282,7 @@ app.get('/api/info', (req, res) => {
     name: 'Revolt Motors Voice Assistant API',
     version: '1.0.0',
     model: process.env.GEMINI_MODEL || 'gemini-2.0-flash-live-001',
-    features: ['real-time-audio', 'interruptions', 'multi-language']
+    features: ['real-time-audio', 'interruptions', 'multi-language', 'chunked-audio']
   });
 });
 
@@ -252,4 +292,5 @@ server.listen(PORT, () => {
   console.log(`Revolt Motors Voice Assistant Server running on port ${PORT}`);
   console.log(`WebSocket server ready for connections`);
   console.log(`Model: ${process.env.GEMINI_MODEL || 'gemini-2.0-flash-live-001'}`);
+  console.log(`Health check: http://localhost:${PORT}/health`);
 });

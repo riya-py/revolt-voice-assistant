@@ -6,226 +6,128 @@ class VoiceAssistantClient {
     this.isRecording = false;
     this.mediaRecorder = null;
     this.audioContext = null;
-    this.audioChunks = [];
-    
-    // Event callbacks
+
     this.onConnectionReady = null;
     this.onAudioResponse = null;
     this.onError = null;
     this.onConnectionChange = null;
   }
 
-  async connect() {
-    try {
-      this.ws = new WebSocket(this.serverUrl);
-      
-      this.ws.onopen = () => {
-        console.log('Connected to voice assistant server');
-        this.isConnected = true;
-        if (this.onConnectionChange) {
-          this.onConnectionChange(true);
-        }
-      };
+  connect() {
+    this.ws = new WebSocket(this.serverUrl);
 
-      this.ws.onmessage = (event) => {
-        try {
-          const message = JSON.parse(event.data);
-          this.handleServerMessage(message);
-        } catch (error) {
-          console.error('Error parsing server message:', error);
-        }
-      };
+    this.ws.onopen = () => {
+      this.isConnected = true;
+      this.onConnectionChange?.(true);
+      console.log("Connected to backend");
+    };
 
-      this.ws.onclose = () => {
-        console.log('Disconnected from voice assistant server');
-        this.isConnected = false;
-        if (this.onConnectionChange) {
-          this.onConnectionChange(false);
+    this.ws.onmessage = (event) => {
+      try {
+        const message = JSON.parse(event.data);
+        if (message.type === 'connection_ready') {
+          this.onConnectionReady?.();
+        } else if (message.type === 'audio_response') {
+          this.onAudioResponse?.(message.data);
+        } else if (message.type === 'error') {
+          this.onError?.(message.message);
         }
-      };
-
-      this.ws.onerror = (error) => {
-        console.error('WebSocket error:', error);
-        if (this.onError) {
-          this.onError('Connection error');
-        }
-      };
-
-    } catch (error) {
-      console.error('Failed to connect to server:', error);
-      if (this.onError) {
-        this.onError('Failed to connect to server');
+      } catch (err) {
+        console.error("Error parsing message:", err);
       }
-    }
-  }
+    };
+this.ws.onclose = () => {
+      this.isConnected = false;
+      this.onConnectionChange?.(false);
+    };
 
-  handleServerMessage(message) {
-    switch (message.type) {
-      case 'connection_ready':
-        console.log('AI assistant ready');
-        if (this.onConnectionReady) {
-          this.onConnectionReady();
-        }
-        break;
-        
-      case 'audio_response':
-        if (this.onAudioResponse) {
-          this.onAudioResponse(message.data);
-        }
-        break;
-        
-      case 'error':
-        console.error('Server error:', message.message);
-        if (this.onError) {
-          this.onError(message.message);
-        }
-        break;
-        
-      default:
-        console.log('Unknown message type:', message.type);
-    }
+    this.ws.onerror = (err) => {
+      console.error("WebSocket error:", err);
+      this.onError?.("WebSocket error");
+    };
   }
 
   async startRecording() {
-    if (!this.isConnected || this.isRecording) {
-      return false;
-    }
+    if (!this.isConnected || this.isRecording) return;
 
     try {
-      const stream = await navigator.mediaDevices.getUserMedia({ 
-        audio: {
-          sampleRate: 16000,
-          channelCount: 1,
-          echoCancellation: true,
-          noiseSuppression: true
-        } 
-      });
-
-      this.audioContext = new (window.AudioContext || window.webkitAudioContext)({
-        sampleRate: 16000
+      const stream = await navigator.mediaDevices.getUserMedia({
+        audio: { sampleRate: 16000, channelCount: 1 }
       });
 
       this.mediaRecorder = new MediaRecorder(stream, {
         mimeType: 'audio/webm;codecs=opus'
       });
 
-      this.audioChunks = [];
-
       this.mediaRecorder.ondataavailable = (event) => {
         if (event.data.size > 0) {
-          this.audioChunks.push(event.data);
+          this.sendAudioChunk(event.data, false); // send live chunk
         }
       };
 
-      this.mediaRecorder.onstop = async () => {
-        const audioBlob = new Blob(this.audioChunks, { type: 'audio/webm' });
-        await this.sendAudioToServer(audioBlob);
-        this.audioChunks = [];
+      this.mediaRecorder.onstop = () => {
+        // Final empty chunk to mark end of turn
+        this.sendAudioChunk(new Blob(), true);
+        stream.getTracks().forEach(track => track.stop());
       };
-
-      this.mediaRecorder.start(100); // Collect data every 100ms
+this.mediaRecorder.start(100); // send every 100ms
       this.isRecording = true;
-      
-      return true;
-    } catch (error) {
-      console.error('Failed to start recording:', error);
-      if (this.onError) {
-        this.onError('Failed to access microphone');
-      }
-      return false;
+
+    } catch (err) {
+      console.error("Mic error:", err);
+      this.onError?.("Microphone access failed");
     }
   }
 
   stopRecording() {
-    if (this.isRecording && this.mediaRecorder) {
+    if (this.isRecording) {
       this.mediaRecorder.stop();
       this.isRecording = false;
-      
-      // Stop all audio tracks
-      if (this.mediaRecorder.stream) {
-        this.mediaRecorder.stream.getTracks().forEach(track => track.stop());
-      }
     }
   }
 
-  async sendAudioToServer(audioBlob) {
-    if (!this.isConnected) return;
+  async sendAudioChunk(blob, isFinal) {
+    if (!this.ws  this.ws.readyState !== WebSocket.OPEN) return;
 
-    try {
-      // Convert blob to base64 for WebSocket transmission
-      const arrayBuffer = await audioBlob.arrayBuffer();
-      const base64Audio = btoa(String.fromCharCode(...new Uint8Array(arrayBuffer)));
-      
-      const message = {
-        type: 'audio_input',
-        audio: base64Audio,
-        mimeType: 'audio/webm'
-      };
+    const arrayBuffer = await blob.arrayBuffer();
+    const base64Audio = this.arrayBufferToBase64(arrayBuffer);
 
-      this.ws.send(JSON.stringify(message));
-    } catch (error) {
-      console.error('Failed to send audio:', error);
-    }
+    this.ws.send(JSON.stringify({
+      type: 'audio_chunk',
+      audio: base64Audio,
+      final: isFinal,
+      mimeType: 'audio/webm;codecs=opus'
+    }));
   }
 
-  interrupt() {
-    if (this.isConnected) {
-      const message = { type: 'interrupt' };
-      this.ws.send(JSON.stringify(message));
+  arrayBufferToBase64(buffer) {
+    let binary = '';
+    const bytes = new Uint8Array(buffer);
+    const chunkSize = 0x8000;
+    for (let i = 0; i < bytes.length; i += chunkSize) {
+      binary += String.fromCharCode(...bytes.subarray(i, i + chunkSize));
     }
+    return btoa(binary);
   }
 
-  startConversation() {
-    if (this.isConnected) {
-      const message = { type: 'start_conversation' };
-      this.ws.send(JSON.stringify(message));
+  playAudioResponse(audioData) {
+    if (!audioData?.inline_data?.data) return;
+    const audioBytes = atob(audioData.inline_data.data);
+    const audioBuffer = new Uint8Array(audioBytes.length);
+    for (let i = 0; i < audioBytes.length; i++) {
+      audioBuffer[i] = audioBytes.charCodeAt(i);
     }
-  }
 
-  async playAudioResponse(audioData) {
-    try {
-      if (!audioData.inlineData || !audioData.inlineData.data) {
-        console.error('Invalid audio data format');
-        return;
-      }
+    if (!this.audioContext) {
+      this.audioContext = new (window.AudioContext  window.webkitAudioContext)();
+    }
 
-      // Decode base64 audio data
-      const audioBytes = atob(audioData.inlineData.data);
-      const audioBuffer = new Uint8Array(audioBytes.length);
-      
-      for (let i = 0; i < audioBytes.length; i++) {
-        audioBuffer[i] = audioBytes.charCodeAt(i);
-      }
-
-      // Create audio context if not exists
-      if (!this.audioContext) {
-        this.audioContext = new (window.AudioContext || window.webkitAudioContext)();
-      }
-
-      // Decode and play audio
-      const decodedAudio = await this.audioContext.decodeAudioData(audioBuffer.buffer);
+    this.audioContext.decodeAudioData(audioBuffer.buffer, (decoded) => {
       const source = this.audioContext.createBufferSource();
-      source.buffer = decodedAudio;
+      source.buffer = decoded;
       source.connect(this.audioContext.destination);
       source.start();
-
-    } catch (error) {
-      console.error('Failed to play audio response:', error);
-    }
-  }
-
-  disconnect() {
-    this.isRecording = false;
-    
-    if (this.mediaRecorder) {
-      this.mediaRecorder.stop();
-    }
-    
-    if (this.ws) {
-      this.ws.close();
-    }
-    
-    this.isConnected = false;
+    });
   }
 }
 
