@@ -26,7 +26,8 @@ const App = () => {
 
   const connectWebSocket = () => {
     try {
-      wsRef.current = new WebSocket('ws://localhost:8080');
+      // FIXED: Changed port from 8080 to 3001 to match server
+      wsRef.current = new WebSocket('ws://localhost:3001');
       
       wsRef.current.onopen = () => {
         setIsConnected(true);
@@ -35,7 +36,7 @@ const App = () => {
         
         // Initialize session
         wsRef.current.send(JSON.stringify({
-          type: 'init_session'
+          type: 'start_conversation'
         }));
       };
 
@@ -47,10 +48,16 @@ const App = () => {
       wsRef.current.onclose = () => {
         setIsConnected(false);
         console.log('Disconnected from voice assistant');
+        // Auto-reconnect after 3 seconds
+        setTimeout(() => {
+          if (!isConnected) {
+            connectWebSocket();
+          }
+        }, 3000);
       };
 
       wsRef.current.onerror = (error) => {
-        setError('Connection failed. Make sure the server is running.');
+        setError('Connection failed. Make sure the server is running on port 3001.');
         console.error('WebSocket error:', error);
       };
 
@@ -61,22 +68,32 @@ const App = () => {
 
   const handleWebSocketMessage = (data) => {
     switch (data.type) {
-      case 'session_ready':
-        console.log('Session ready:', data.message);
+      case 'connection_ready':
+        console.log('Connection ready');
         break;
         
-      case 'ai_response':
-        setMessages(prev => [...prev, {
-          type: 'ai',
-          text: data.text,
-          timestamp: data.timestamp
-        }]);
+      case 'audio_response':
+        // Handle audio response from Gemini
+        if (data.data && data.data.inline_data) {
+          // Play the audio response
+          playAudioResponse(data.data.inline_data.data);
+        }
         setIsProcessing(false);
-        speakText(data.text);
         break;
         
-      case 'interrupted':
-        console.log('AI interrupted');
+      case 'server_content':
+        // Handle text responses if any
+        if (data.data && data.data.parts) {
+          const textPart = data.data.parts.find(part => part.text);
+          if (textPart) {
+            setMessages(prev => [...prev, {
+              type: 'ai',
+              text: textPart.text,
+              timestamp: Date.now()
+            }]);
+            speakText(textPart.text);
+          }
+        }
         setIsProcessing(false);
         break;
         
@@ -87,6 +104,36 @@ const App = () => {
         
       default:
         console.log('Unknown message type:', data.type);
+    }
+  };
+
+  const playAudioResponse = (base64Audio) => {
+    try {
+      // Convert base64 to audio and play
+      const audioData = atob(base64Audio);
+      const audioArray = new Uint8Array(audioData.length);
+      for (let i = 0; i < audioData.length; i++) {
+        audioArray[i] = audioData.charCodeAt(i);
+      }
+      
+      const audioBlob = new Blob([audioArray], { type: 'audio/wav' });
+      const audioUrl = URL.createObjectURL(audioBlob);
+      const audio = new Audio(audioUrl);
+      
+      audio.play().then(() => {
+        console.log('Playing AI audio response');
+      }).catch(error => {
+        console.error('Error playing audio:', error);
+        // Fallback to text-to-speech if audio playback fails
+      });
+      
+      // Cleanup
+      audio.onended = () => {
+        URL.revokeObjectURL(audioUrl);
+      };
+      
+    } catch (error) {
+      console.error('Error processing audio response:', error);
     }
   };
 
@@ -147,6 +194,7 @@ const App = () => {
   const sendAudioToServer = async (audioBlob) => {
     if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) {
       setError('Not connected to server');
+      setIsProcessing(false);
       return;
     }
 
@@ -158,13 +206,14 @@ const App = () => {
         wsRef.current.send(JSON.stringify({
           type: 'audio_chunk',
           audio: base64Audio,
-          mimeType: 'audio/webm;codecs=opus'
+          mimeType: 'audio/webm',
+          final: true
         }));
 
         // Add user message to chat
         setMessages(prev => [...prev, {
           type: 'user',
-          text: 'Voice message sent...',
+          text: '🎤 Voice message sent...',
           timestamp: Date.now()
         }]);
       };
@@ -172,6 +221,7 @@ const App = () => {
       reader.readAsDataURL(audioBlob);
     } catch (error) {
       setError('Failed to send audio');
+      setIsProcessing(false);
       console.error('Audio send error:', error);
     }
   };
@@ -210,6 +260,12 @@ const App = () => {
   };
 
   const toggleRecording = () => {
+    if (!isConnected) {
+      setError('Not connected to server. Trying to reconnect...');
+      connectWebSocket();
+      return;
+    }
+
     if (isListening) {
       stopRecording();
     } else {
@@ -281,15 +337,15 @@ const App = () => {
           {/* Voice Controls */}
           <div className="voice-controls">
             <button
-              className={`mic-button ${isListening ? 'listening' : ''} ${isProcessing ? 'processing' : ''}`}
+              className={`mic-button ${isListening ? 'listening' : ''} ${isProcessing ? 'processing' : ''} ${!isConnected ? 'disabled' : ''}`}
               onClick={toggleRecording}
-              disabled={!isConnected}
+              disabled={isProcessing}
             >
               <div className="mic-icon">
-                {isListening ? '🔴' : isProcessing ? '⏳' : '🎤'}
+                {!isConnected ? '❌' : isListening ? '🔴' : isProcessing ? '⏳' : '🎤'}
               </div>
               <div className="mic-status">
-                {isListening ? 'Listening...' : isProcessing ? 'Processing...' : 'Tap to speak'}
+                {!isConnected ? 'Disconnected' : isListening ? 'Listening...' : isProcessing ? 'Processing...' : 'Tap to speak'}
               </div>
             </button>
 
